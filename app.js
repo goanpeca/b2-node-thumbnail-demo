@@ -2,16 +2,21 @@ import bodyParser from "body-parser";
 import express from "express";
 import sharp from "sharp";
 import {StatusCodes} from "http-status-codes";
-import {ListBucketsCommand, S3} from "@aws-sdk/client-s3";
+import {
+  GetObjectCommand,
+  HeadBucketCommand,
+  PutObjectCommand,
+  S3Client
+} from "@aws-sdk/client-s3";
 import {getEndpointFromInstructions} from "@smithy/middleware-endpoint";
 import {createHmac} from "node:crypto";
-import dotenv from "dotenv"
+import dotenv from "dotenv";
 
 // Get the resolved S3 endpoint - very useful for debugging!
 // See https://github.com/aws/aws-sdk-js-v3/issues/4122#issuecomment-1298968804
-async function getS3Endpoint(client) {
-  const command = new ListBucketsCommand({});
-  return getEndpointFromInstructions(command.input, ListBucketsCommand, client.config);
+async function getS3Endpoint(client, bucket) {
+  const command = new HeadBucketCommand({Bucket: bucket});
+  return getEndpointFromInstructions(command.input, HeadBucketCommand, client.config);
 }
 
 // Log a message to the console and throw an error
@@ -63,10 +68,10 @@ async function createThumbnail(bucket, keyBase, extension) {
 
     // Get the image from B2 (returns a readable stream as the body)
     console.log(`Fetching image from b2://${bucket}/${key}`);
-    const obj = await client.getObject({
+    const obj = await client.send(new GetObjectCommand({
       Bucket: bucket,
       Key: key
-    });
+    }));
 
     // Create a Sharp transformer into which we can stream image data
     const transformer = sharp()
@@ -91,12 +96,18 @@ async function createThumbnail(bucket, keyBase, extension) {
 
     // Write the thumbnail buffer to the same B2 bucket as the original
     console.log(`Writing thumbnail to b2://${bucket}/${outputKey}`);
-    await client.putObject({
+    await client.send(new PutObjectCommand({
       Bucket: bucket,
       Key: outputKey,
       Body: thumbnail,
       ContentType: outputContentType
-    });
+    }));
+
+    if (B2_PUBLIC_URL_BASE) {
+      const encodedOutputKey = outputKey.split("/").map(encodeURIComponent).join("/");
+      const publicUrl = `${B2_PUBLIC_URL_BASE.replace(/\/$/, "")}/${encodedOutputKey}`;
+      console.log(`Thumbnail available at ${publicUrl}`);
+    }
   } catch (err) {
     console.log(err);
   }
@@ -123,24 +134,48 @@ const IMAGE_EXTENSIONS = [
 // In production, we want to give environment variables precedence
 dotenv.config({ override: (process.env.NODE_ENV === 'development') });
 
+const REQUIRED_ENV_VARS = [
+  "B2_APPLICATION_KEY_ID",
+  "B2_APPLICATION_KEY",
+  "B2_BUCKET_NAME",
+  "B2_REGION",
+  "RESIZE_OPTIONS",
+  "SIGNING_SECRET"
+];
+
+for (const name of REQUIRED_ENV_VARS) {
+  if (!process.env[name]) {
+    console.error(`Missing required environment variable: ${name}`);
+    process.exit(1);
+  }
+}
+
 // Read configuration from the environment
+const B2_BUCKET_NAME = process.env.B2_BUCKET_NAME;
+const B2_REGION = process.env.B2_REGION;
+const B2_PUBLIC_URL_BASE = process.env.B2_PUBLIC_URL_BASE;
+const S3_ENDPOINT = `https://s3.${B2_REGION}.backblazeb2.com`;
 const RESIZE_OPTIONS = JSON.parse(process.env.RESIZE_OPTIONS);
 const SIGNING_SECRET = process.env.SIGNING_SECRET;
 
 // Create an S3 client object
-//
-// The S3 client constructor will look for configuration in environment variables,
-// then the shared credentials file, etc.
-// See https://docs.aws.amazon.com/sdk-for-javascript/v3/developer-guide/setting-credentials-node.html
-const client = new S3();
+const client = new S3Client({
+  endpoint: S3_ENDPOINT,
+  region: B2_REGION,
+  credentials: {
+    accessKeyId: process.env.B2_APPLICATION_KEY_ID,
+    secretAccessKey: process.env.B2_APPLICATION_KEY
+  },
+  customUserAgent: "b2-node-thumbnail-demo/1.0.0 (backblaze-b2-samples)"
+});
 
-// Sanity check - we should always be able to list buckets
+// Sanity check - we should always be able to access the configured bucket
 try {
-  const response = await client.listBuckets();
-  const endpoint = await getS3Endpoint(client);
-  console.log(`Successfully called S3 service at ${endpoint.url}: ${response.Buckets.length} buckets listed`);
+  await client.send(new HeadBucketCommand({Bucket: B2_BUCKET_NAME}));
+  const endpoint = await getS3Endpoint(client, B2_BUCKET_NAME);
+  console.log(`Successfully called S3 service at ${endpoint.url}: ${B2_BUCKET_NAME} bucket is accessible`);
 } catch (error) {
-  console.error(`Error listing buckets: ${error}`);
+  console.error(`Error accessing bucket ${B2_BUCKET_NAME}: ${error}`);
   process.exit(1);
 }
 
@@ -176,6 +211,7 @@ router.post('/thumbnail', async (request,response) => {
   if (!(IMAGE_EXTENSIONS.includes(extensionLower))
       || !(event['eventType'].startsWith('b2:ObjectCreated:'))
       || !(bucket && keyBase)
+      || bucket !== B2_BUCKET_NAME
       || keyBase.endsWith(TN_SUFFIX)) {
     console.log(`Skipping b2://${bucket}/${key}`);
     response.sendStatus(StatusCodes.NO_CONTENT).end();

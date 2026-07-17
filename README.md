@@ -18,17 +18,19 @@ Be sure to copy the application key as soon as you create it, as you will not be
 
 ## Configuration
 
-Copy [`.env.template`](.env.template) to `.env`, then paste in your application 
-key, endpoint, etc.:
+Copy [`.env.example`](.env.example) to `.env`, then paste in your application
+key, bucket, etc.:
 
 ```dotenv
-AWS_ACCESS_KEY_ID=<Your Backblaze B2 Application Key ID>
-AWS_SECRET_ACCESS_KEY=<Your Backblaze B2 Application Key>
-AWS_ENDPOINT_URL=https://<Your Backblaze B2 bucket endpoint>
-AWS_REGION=<Your Backblaze B2 bucket region>
+B2_APPLICATION_KEY_ID=<Your Backblaze B2 Application Key ID>
+B2_APPLICATION_KEY=<Your Backblaze B2 Application Key>
+B2_BUCKET_NAME=<Your Backblaze B2 bucket name>
+B2_REGION=<Your Backblaze B2 bucket region>
+B2_PUBLIC_URL_BASE=https://f<account-id>.backblazeb2.com/file/<bucket-name>
 RESIZE_OPTIONS={"width": 240, "withoutEnlargement": true}
 SIGNING_SECRET=<Your Event Notification rule signing secret>
 NODE_ENV=development
+PORT=3000
 ```
 
 ## Running the App Locally
@@ -52,7 +54,7 @@ listening for requests on port 3000:
 > b2-node-thumbnail-demo@1.0.0 start
 > node app.js
 
-Successfully called S3 service at https://s3.us-west-004.backblazeb2.com/: 61 buckets listed
+Successfully called S3 service at https://s3.<your-region>.backblazeb2.com/: <your-bucket> bucket is accessible
 Listening on port 3000
 ```
 
@@ -64,7 +66,7 @@ You can set the PORT environment variable to override the default, e.g.:
 > b2-node-thumbnail-demo@1.0.0 start
 > node app.js
 
-Successfully called S3 service at https://s3.us-west-004.backblazeb2.com/: 61 buckets listed
+Successfully called S3 service at https://s3.<your-region>.backblazeb2.com/: <your-bucket> bucket is accessible
 Listening on port 80
 ```
 
@@ -120,7 +122,7 @@ When running the app, you must:
 
 * Use the `-p` flag to bind port `3000` of the container to an
   available port on the host.
-* Specify values for the environment variables listed in `.env.template`, via 
+* Specify values for the environment variables listed in `.env.example`, via
 multiple uses of the `-e`/`--env` flag or by using the `--env-file` flag to load
 the environment variables from a file.
 
