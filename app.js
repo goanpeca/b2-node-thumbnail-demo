@@ -8,16 +8,15 @@ import {
   PutObjectCommand,
   S3Client
 } from "@aws-sdk/client-s3";
-import {getEndpointFromInstructions} from "@smithy/middleware-endpoint";
+import {NodeHttpHandler} from "@smithy/node-http-handler";
 import {createHmac} from "node:crypto";
+import {createRequire} from "node:module";
 import dotenv from "dotenv";
+import {loadConfig} from "./config.js";
+import {isValidSignature} from "./security.js";
 
-// Get the resolved S3 endpoint - very useful for debugging!
-// See https://github.com/aws/aws-sdk-js-v3/issues/4122#issuecomment-1298968804
-async function getS3Endpoint(client, bucket) {
-  const command = new HeadBucketCommand({Bucket: bucket});
-  return getEndpointFromInstructions(command.input, HeadBucketCommand, client.config);
-}
+const require = createRequire(import.meta.url);
+const pkg = require("./package.json");
 
 // Log a message to the console and throw an error
 function throwError(response, status, message, detail) {
@@ -34,11 +33,11 @@ function verifySignature(request, response, buffer, _encoding) {
     const signature = request.headers['x-bz-event-notification-signature'];
     const pair = signature.split('=');
     if (!pair || pair.length !== 2) {
-      throwError(response, 401, 'Invalid signature format', signature);
+      throwError(response, 401, 'Invalid signature format', 'malformed signature');
     }
     const version = pair[0];
     if (version !== 'v1') {
-      throwError(response, 401, 'Invalid signature version', version);
+      throwError(response, 401, 'Invalid signature version', 'unsupported signature version');
     }
 
     // Now calculate the HMAC and compare it with the one sent in the header
@@ -46,11 +45,11 @@ function verifySignature(request, response, buffer, _encoding) {
     const calculatedSig = createHmac('sha256', SIGNING_SECRET)
         .update(buffer)
         .digest('hex');
-    if (receivedSig !== calculatedSig) {
+    if (!isValidSignature(receivedSig, calculatedSig)) {
       throwError(response,
           401,
           'Invalid signature',
-          `Received ${receivedSig}; calculated ${calculatedSig}`
+          'signature mismatch'
       );
     }
   } else {
@@ -134,49 +133,54 @@ const IMAGE_EXTENSIONS = [
 // In production, we want to give environment variables precedence
 dotenv.config({ override: (process.env.NODE_ENV === 'development') });
 
-const REQUIRED_ENV_VARS = [
-  "B2_APPLICATION_KEY_ID",
-  "B2_APPLICATION_KEY",
-  "B2_BUCKET_NAME",
-  "B2_REGION",
-  "RESIZE_OPTIONS",
-  "SIGNING_SECRET"
-];
+const S3_CONNECTION_TIMEOUT_MS = 5000;
+const S3_REQUEST_TIMEOUT_MS = 30000;
+const S3_MAX_ATTEMPTS = 3;
 
-for (const name of REQUIRED_ENV_VARS) {
-  if (!process.env[name]) {
-    console.error(`Missing required environment variable: ${name}`);
-    process.exit(1);
-  }
+let config;
+try {
+  config = loadConfig();
+} catch (error) {
+  console.error(error.message);
+  process.exit(1);
 }
 
-// Read configuration from the environment
-const B2_BUCKET_NAME = process.env.B2_BUCKET_NAME;
-const B2_REGION = process.env.B2_REGION;
-const B2_PUBLIC_URL_BASE = process.env.B2_PUBLIC_URL_BASE;
-const S3_ENDPOINT = `https://s3.${B2_REGION}.backblazeb2.com`;
-const RESIZE_OPTIONS = JSON.parse(process.env.RESIZE_OPTIONS);
-const SIGNING_SECRET = process.env.SIGNING_SECRET;
+for (const {oldName, newName} of config.deprecatedEnvVars) {
+  console.warn(`${oldName} is deprecated; use ${newName} instead.`);
+}
+
+const B2_BUCKET_NAME = config.bucketName;
+const B2_PUBLIC_URL_BASE = config.publicUrlBase;
+const RESIZE_OPTIONS = config.resizeOptions;
+const SIGNING_SECRET = config.signingSecret;
 
 // Create an S3 client object
 const client = new S3Client({
-  endpoint: S3_ENDPOINT,
-  region: B2_REGION,
+  endpoint: config.s3Endpoint,
+  region: config.region,
   credentials: {
-    accessKeyId: process.env.B2_APPLICATION_KEY_ID,
-    secretAccessKey: process.env.B2_APPLICATION_KEY
+    accessKeyId: config.applicationKeyId,
+    secretAccessKey: config.applicationKey
   },
-  customUserAgent: "b2-node-thumbnail-demo/1.0.0 (backblaze-b2-samples)"
+  requestHandler: new NodeHttpHandler({
+    connectionTimeout: S3_CONNECTION_TIMEOUT_MS,
+    requestTimeout: S3_REQUEST_TIMEOUT_MS
+  }),
+  maxAttempts: S3_MAX_ATTEMPTS,
+  customUserAgent: `${pkg.name}/${pkg.version} (backblaze-b2-samples)`
 });
 
-// Sanity check - we should always be able to access the configured bucket
-try {
-  await client.send(new HeadBucketCommand({Bucket: B2_BUCKET_NAME}));
-  const endpoint = await getS3Endpoint(client, B2_BUCKET_NAME);
-  console.log(`Successfully called S3 service at ${endpoint.url}: ${B2_BUCKET_NAME} bucket is accessible`);
-} catch (error) {
-  console.error(`Error accessing bucket ${B2_BUCKET_NAME}: ${error}`);
-  process.exit(1);
+console.log(`Configured S3 service endpoint: ${config.s3Endpoint}`);
+
+// Sanity check the configured bucket when it is supplied.
+if (B2_BUCKET_NAME) {
+  try {
+    await client.send(new HeadBucketCommand({Bucket: B2_BUCKET_NAME}));
+    console.log(`${B2_BUCKET_NAME} bucket is accessible`);
+  } catch (error) {
+    console.error(`Error accessing bucket ${B2_BUCKET_NAME}: ${error}`);
+    process.exit(1);
+  }
 }
 
 // Set up Express
@@ -211,7 +215,6 @@ router.post('/thumbnail', async (request,response) => {
   if (!(IMAGE_EXTENSIONS.includes(extensionLower))
       || !(event['eventType'].startsWith('b2:ObjectCreated:'))
       || !(bucket && keyBase)
-      || bucket !== B2_BUCKET_NAME
       || keyBase.endsWith(TN_SUFFIX)) {
     console.log(`Skipping b2://${bucket}/${key}`);
     response.sendStatus(StatusCodes.NO_CONTENT).end();
