@@ -31,6 +31,14 @@ function readRequiredEnv(env, primaryName, fallbackName) {
   throw new Error(`Missing required environment variable: ${primaryName}${fallbackMessage}`);
 }
 
+function parseJsonEnv(name, value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new Error(`${name} must contain valid JSON`);
+  }
+}
+
 export function validateB2Region(rawRegion, sourceName = "B2_REGION") {
   const region = rawRegion?.trim();
   if (!region || !B2_REGION_PATTERN.test(region)) {
@@ -84,7 +92,7 @@ export function loadConfig(env = process.env) {
     bucketName: trimmedEnv(env, "B2_BUCKET_NAME"),
     publicUrlBase: trimmedEnv(env, "B2_PUBLIC_URL_BASE"),
     region,
-    resizeOptions: JSON.parse(resizeOptions.value),
+    resizeOptions: parseJsonEnv(resizeOptions.name, resizeOptions.value),
     signingSecret: signingSecret.value,
     s3Endpoint: resolveS3Endpoint(region, trimmedEnv(env, "AWS_ENDPOINT_URL")),
     deprecatedEnvVars: [

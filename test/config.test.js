@@ -49,6 +49,16 @@ test("loadConfig accepts deprecated AWS variables during rollout", () => {
   );
 });
 
+test("loadConfig reports invalid resize options JSON clearly", () => {
+  assert.throws(
+      () => loadConfig({
+        ...requiredEnv,
+        RESIZE_OPTIONS: "{invalid"
+      }),
+      /RESIZE_OPTIONS must contain valid JSON/
+  );
+});
+
 test("validateB2Region trims and accepts valid Backblaze region tokens", () => {
   assert.equal(validateB2Region(" us-west-004 "), "us-west-004");
   assert.equal(validateB2Region("eu-central-003"), "eu-central-003");
